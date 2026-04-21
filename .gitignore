@@ -1,0 +1,18 @@
+# Data files (too large for git)
+data/raw/
+data/parquet/
+data/stacks/
+data/geocode_cache.json
+
+# Output parquets tracked via DVC or manually
+data/cohort_candidates.parquet
+data/cohort_geolocated.parquet
+data/declared_progress.parquet
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store

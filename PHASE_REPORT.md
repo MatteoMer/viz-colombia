@@ -137,6 +137,76 @@ uv run python scripts/phase4_satellite.py --project=YOUR_PROJECT_ID
 
 ---
 
+---
+
+## Phase 4 — Signal Construction (Procurement-Only Path)
+
+**Pivot:** Satellites dropped from scope. Demo rebuilt on pure procurement signals.
+
+**Reference population:** 28,601 Obra contracts (2020-2024) nationwide.
+
+### Signal Summary
+
+| Signal | Scope | Coverage | Flag Rate | Notes |
+|--------|-------|----------|-----------|-------|
+| S1 Stall | contract | 13,140 | P95: score>1205 | 82.6% above raw threshold 100 — percentile used instead |
+| S2 Value Creep | contract | 25,357 | 14.1% > 0.3 | Median 0%, P95 0.48, extreme outliers at 1499x |
+| S2 Value Creep | contractor | 3,441 | 11.1% > 0.3 | Portfolio-weighted |
+| S3 Slippage | contract | 23,272 | 7.1% > 0.5 | Healthy distribution |
+| S3 Slippage | contractor | 2,984 | 6.2% > 0.5 | Portfolio-weighted |
+| S4 Bunching | entity-yr | 23,781 | 3,880 flagged | Mínima cuantía most common |
+| S5 Concentration | entity-qtr | 31,837 | 3,809 flagged | HHI>0.25 & streak≥3 |
+| S6 Single Bidder | entity-yr | 3,199 | 67% mean rate | High baseline — data quality issue |
+| S7 Award Speed | process | 18,543 | 5.0% flagged | R²=0.531, 326 fast + 596 slow |
+| S8 Relationship | edge | 872 | max z=2.1 | Small Obra-only graph, compressed distribution |
+
+**Decisions under ambiguity:**
+- S2 uses process `estimated_value_cop` as baseline (contract field is empty for Obra)
+- S4 uses simplified national thresholds (entity-specific budgets not available)
+- S6 high baseline (67%) likely reflects unpopulated bid count fields rather than true single-bidder rates
+- S8 restricted to Obra-only to avoid overflow from all-contract gravity model
+
+---
+
+## Phase 5 — Composite Score & Demo Cohort
+
+**Composite distribution (28,601 contracts):**
+- Min: -5.49, Median: -0.21, P90: 1.84, P95: 2.50, P99: 4.16, Max: 11.39
+
+**Demo cohort:** 150 contracts from geolocated set, ranked by composite.
+
+**Contractor league table:** 319 contractors with ≥3 contracts in demo or ≥10 in refpop.
+
+**Top entity patterns:**
+- **Mosquera (Cundinamarca):** 3 contracts in top 20, 2 to same contractor (Consorcio Génesis). HHI-driven.
+- **Ricaurte (Cundinamarca):** 2 contracts in top 20 with bunching + stall.
+- **Tuluá (Valle):** 2 sports facility contracts with single bidder.
+
+**Sanity check:** 4/10 top contracts have >60% of composite from single signal (mostly HHI or bunching). Weights are first guesses — acceptable for demo, should be tuned with labeled outcomes.
+
+---
+
+## Phase 6 — Inspection & Methodology
+
+**Inspection of top 20 flagged contracts:**
+
+| Verdict | Count |
+|---------|-------|
+| Pattern holds | 10 |
+| Benign explanation | 3 |
+| Ambiguous | 7 |
+
+**50% hold rate** — 10 of 20 contracts show patterns that warrant genuine review. Benign cases are mostly intergovernmental transfers and national standardized programs. See `data/inspection_log.md` for full details.
+
+**Methodology document:** `METHODOLOGY.md` — covers all 8 signals, composite weights, claims/non-claims, blind spots, and extension paths.
+
+**Recommended signal adjustments based on inspection:**
+- S7 (Award speed): add entity type covariate to filter intergovernmental transfers
+- S6 (Single bidder): investigate data quality of bid count field before increasing weight
+- S5 (Concentration): consider normalizing by entity size to reduce over-flagging of large entities
+
+---
+
 ## Deliverables Status
 
 | File | Status | Rows/Size |
@@ -144,6 +214,15 @@ uv run python scripts/phase4_satellite.py --project=YOUR_PROJECT_ID
 | `data/cohort_candidates.parquet` | Done | 200 rows |
 | `data/cohort_geolocated.parquet` | Done | 182 rows |
 | `data/declared_progress.parquet` | Done | 4,804 rows |
-| `data/stacks/site_*.npz` | Pending (Phase 4) | — |
-| `data/stacks/fetch_errors.jsonl` | Pending (Phase 4) | — |
+| `data/reference_population.parquet` | Done | 28,601 rows |
+| `data/entity_year_budget.parquet` | Done | 10,768 rows |
+| `data/category_medians.parquet` | Done | 202 rows |
+| `data/contractor_portfolio.parquet` | Done | 13,029 rows |
+| `data/obra_bid_counts.parquet` | Done | 83,509 rows |
+| `data/signals/s1–s8_*.parquet` | Done | 10 files |
+| `data/anomaly_scored.parquet` | Done | 28,601 rows |
+| `data/demo_cohort.parquet` | Done | 150 rows |
+| `data/demo_contractors.parquet` | Done | 319 rows |
+| `data/inspection_log.md` | Done | 20 contracts |
+| `METHODOLOGY.md` | Done | — |
 | `PHASE_REPORT.md` | This file | — |

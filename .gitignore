@@ -4,10 +4,10 @@ data/parquet/
 data/stacks/
 data/geocode_cache.json
 
-# Output parquets tracked via DVC or manually
-data/cohort_candidates.parquet
-data/cohort_geolocated.parquet
-data/declared_progress.parquet
+# Output parquets (regenerable from scripts)
+data/*.parquet
+data/signals/
+data/geocode_cache.json
 
 # Python
 __pycache__/

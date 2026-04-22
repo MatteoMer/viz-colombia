@@ -1,0 +1,124 @@
+@import "tailwindcss";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-display: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --color-navy: #0a0a0f;
+  --color-navy-light: #111116;
+  --color-accent: #6fd4f5;
+  --color-accent-light: #8eddf7;
+  --color-alert: #e04a5f;
+  --color-warn: #f0a878;
+  --color-surface: #0d0d12;
+  --color-surface-alt: #141419;
+  --color-bg: #08080c;
+  --color-text-primary: #d0d0d8;
+  --color-text-secondary: #555560;
+  --color-border: #1a1a22;
+  --color-glass: rgba(10, 10, 15, 0.88);
+}
+
+/* Dark body/root */
+html, body, #root {
+  background-color: #08080c;
+  color: #d0d0d8;
+  font-feature-settings: "tnum" 1;
+}
+
+/* MapLibre container bg — darken basemap so Colombia is the only lit landmass */
+.maplibregl-map {
+  background: #050810;
+}
+.maplibregl-canvas {
+  filter: brightness(0.45) saturate(0.3);
+}
+
+/* Hide MapLibre default attribution */
+.maplibregl-ctrl-attrib {
+  display: none !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #1a1a22; border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: #28282e; }
+
+/* Skeleton shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #0d0d12 25%, #141419 50%, #0d0d12 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 0;
+}
+
+/* Instrument panel — solid surface, no blur */
+.panel {
+  background: rgba(10, 10, 15, 0.92);
+  border: 1px solid #1a1a22;
+}
+
+/* Legacy glass alias — maps to panel now */
+.glass {
+  background: rgba(10, 10, 15, 0.92);
+  border: 1px solid #1a1a22;
+}
+
+/* Subtle row hover */
+.table-row-hover:hover {
+  background: rgba(111, 212, 245, 0.03);
+}
+
+/* deck.gl tooltip */
+.deck-tooltip {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  padding: 8px 12px;
+  border-radius: 0;
+  border: 1px solid #1a1a22;
+  background: rgba(10, 10, 15, 0.95) !important;
+  color: #d0d0d8 !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.6);
+  max-width: 300px;
+  pointer-events: none;
+  z-index: 100;
+  letter-spacing: 0.02em;
+}
+
+/* Histogram brush selection */
+.score-histogram .selection {
+  fill: rgba(111, 212, 245, 0.2);
+  stroke: rgba(111, 212, 245, 0.5);
+  stroke-width: 1;
+}
+
+/* Section header — reusable label style */
+.section-label {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #555560;
+}
+
+/* Nav item label */
+.nav-label {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* Mono data value */
+.mono-value {
+  font-family: "IBM Plex Mono", monospace;
+  font-variant-numeric: tabular-nums;
+}

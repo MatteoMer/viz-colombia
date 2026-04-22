@@ -5,12 +5,147 @@ and supporting lookup tables for signal computation.
 """
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+
+# ── Detection regexes ─────────────────────────────────────────────
+
+MANDATO_RE = re.compile(
+    r"mandato\s+sin\s+representaci[oó]n"
+    r"|mandato\s+s/\s?representaci[oó]n"
+    r"|mandato\s+s/\s?rep(?!resentaci)",
+    re.IGNORECASE,
+)
+
+EICE_RE = re.compile(
+    r"empresa\s+para\s+el\s+desarrollo"
+    r"|empresa\s+industrial\s+y\s+comercial"
+    r"|empresa\s+de\s+desarrollo"
+    r"|\bEICE\b"
+    r"|E\.I\.C\.E",
+    re.IGNORECASE,
+)
+
+CONSORTIUM_RE = re.compile(
+    r"^(?:CONSORCIO|UNION\s+TEMPORAL|U\.?T\.?\s|PROMESA\s+DE\s+SOCIEDAD\s+FUTURA)",
+    re.IGNORECASE,
+)
+
+# Regimen especial sub-cohort regexes
+ESE_RE = re.compile(r"E\.S\.E\.|empresa\s+social\s+del\s+estado", re.IGNORECASE)
+UNIVERSIDAD_RE = re.compile(r"universidad|institucion\s+universitaria", re.IGNORECASE)
+D092_RE = re.compile(r"decreto\s+092|solidaridad", re.IGNORECASE)
+CONVENIO_RE = re.compile(r"convenio\s+interadministrativo", re.IGNORECASE)
+
+# Object classification regexes
+OBJ_HEALTH_RE = re.compile(r"hospital|centro\s+de\s+salud|puesto\s+de\s+salud|E\.S\.E\.", re.IGNORECASE)
+OBJ_ROAD_RE = re.compile(r"pavimento|placa\s+huella|v[ií]a\b|carretera|puente", re.IGNORECASE)
+OBJ_EDU_RE = re.compile(r"colegio|instituci[oó]n\s+educativa|aula|escuela", re.IGNORECASE)
+OBJ_RECREATION_RE = re.compile(r"parque|cancha|polideportivo|recreaci[oó]n", re.IGNORECASE)
+OBJ_WATER_RE = re.compile(r"acueducto|alcantarillado|agua\s+potable|saneamiento", re.IGNORECASE)
+
+
+def is_mandato(text: str) -> bool:
+    """Detect mandato sin representación contracts."""
+    if not isinstance(text, str):
+        return False
+    return bool(MANDATO_RE.search(text))
+
+
+def is_eice(text: str) -> bool:
+    """Detect EICE (empresa industrial y comercial del estado) suppliers."""
+    if not isinstance(text, str):
+        return False
+    return bool(EICE_RE.search(text))
+
+
+def is_consortium(text: str) -> bool:
+    """Detect consortium/UT suppliers by name prefix."""
+    if not isinstance(text, str):
+        return False
+    return bool(CONSORTIUM_RE.search(text.strip()))
+
+
+def classify_especial_subtype(entity_name: str, object_desc: str) -> str:
+    """Sub-classify regimen especial contracts."""
+    en = entity_name if isinstance(entity_name, str) else ""
+    od = object_desc if isinstance(object_desc, str) else ""
+    combined = en + " " + od
+    if ESE_RE.search(en):
+        return "especial_ese"
+    if UNIVERSIDAD_RE.search(en):
+        return "especial_universidad"
+    if D092_RE.search(od):
+        return "especial_d092"
+    if CONVENIO_RE.search(combined):
+        return "especial_convenio"
+    return "especial_otro"
+
+
+def classify_object(category_4digit: str, object_desc: str) -> str:
+    """Classify contract object into semantic category."""
+    cat = str(category_4digit) if isinstance(category_4digit, str) else ""
+    desc = object_desc if isinstance(object_desc, str) else ""
+
+    # UNSPSC prefix + keyword match
+    if cat.startswith("85") and OBJ_HEALTH_RE.search(desc):
+        return "health_infra"
+    if OBJ_HEALTH_RE.search(desc) and cat.startswith("72"):
+        return "health_infra"
+    if cat.startswith("72") and OBJ_ROAD_RE.search(desc):
+        return "road_construction"
+    if OBJ_ROAD_RE.search(desc):
+        return "road_construction"
+    if cat.startswith("72") and OBJ_EDU_RE.search(desc):
+        return "education_infra"
+    if OBJ_EDU_RE.search(desc):
+        return "education_infra"
+    if OBJ_RECREATION_RE.search(desc):
+        return "recreation"
+    if (cat.startswith("83") or cat.startswith("72")) and OBJ_WATER_RE.search(desc):
+        return "water_sanitation"
+    if OBJ_WATER_RE.search(desc):
+        return "water_sanitation"
+    return "other"
+
+
+def assign_cohort(row=None, *, method=None, is_mandato=False, is_eice=False,
+                   entity_name="", object_description=""):
+    """Assign procurement cohort key for z-score conditioning.
+
+    Can be called with a DataFrame row or with keyword arguments directly.
+    Regimen especial contracts get sub-cohort keys (especial_ese, etc.).
+    """
+    if row is not None:
+        _is_mandato = row["is_mandato"]
+        _is_eice = row["is_eice"]
+        _method = row["procurement_method_norm"]
+        _entity = row.get("entity_name", "") or ""
+        _desc = row.get("object_description", "") or ""
+    else:
+        _is_mandato = is_mandato
+        _is_eice = is_eice
+        _method = method
+        _entity = entity_name
+        _desc = object_description
+
+    if _is_mandato:
+        return "mandato"
+    if _is_eice:
+        return "eice"
+    if _method in ("CONTRATACION_DIRECTA", "CONTRATACION_DIRECTA_CON_OFERTAS"):
+        return "directa"
+    if _method == "MINIMA_CUANTIA":
+        return "minima"
+    if _method in ("REGIMEN_ESPECIAL", "REGIMEN_ESPECIAL_CON_OFERTAS"):
+        return classify_especial_subtype(_entity, _desc)
+    return "competitive"
 
 DATA_DIR = Path("data")
 PARQUET_DIR = DATA_DIR / "parquet"
@@ -33,9 +168,9 @@ def build_reference_population():
         "object_description", "procurement_method_raw", "procurement_method_norm",
         "estimated_value_cop", "awarded_value_cop", "contract_signature_date",
         "contract_start_date", "contract_end_date", "status_raw", "status_norm",
-        "supplier_id", "supplier_name", "category_code", "valor_pagado",
-        "valor_facturado", "valor_pendiente_pago", "dias_adicionados",
-        "source_record_uri",
+        "supplier_id", "supplier_name", "supplier_doc_type", "category_code",
+        "valor_pagado", "valor_facturado", "valor_pendiente_pago",
+        "dias_adicionados", "source_record_uri",
     ]
     contracts = read_parquet_dir(PARQUET_DIR / "contracts", columns=contract_cols)
     print(f"  Total contracts loaded: {len(contracts):,}", flush=True)
@@ -90,6 +225,41 @@ def build_reference_population():
     refpop["category_4digit"] = refpop["category_code"].str.extract(
         r"V1\.(\d{4})", expand=False
     )
+
+    # Detection flags
+    refpop["is_mandato"] = refpop["object_description"].apply(is_mandato)
+    refpop["is_eice"] = refpop["supplier_name"].apply(is_eice)
+    refpop["is_consortium"] = refpop["supplier_name"].apply(is_consortium)
+    refpop["cohort_key"] = refpop.apply(assign_cohort, axis=1)
+
+    # Object classification
+    refpop["object_category"] = refpop.apply(
+        lambda r: classify_object(r.get("category_4digit", ""), r.get("object_description", "")),
+        axis=1,
+    )
+
+    # DIVIPOLA crosswalk (graceful if covariate data absent)
+    crosswalk_path = Path("data/covariates/divipola_crosswalk.parquet")
+    if crosswalk_path.exists():
+        crosswalk = pd.read_parquet(crosswalk_path)
+        refpop = refpop.merge(
+            crosswalk[["department_norm", "municipality_norm", "codigo_divipola"]],
+            on=["department_norm", "municipality_norm"],
+            how="left",
+        )
+        n_matched = refpop["codigo_divipola"].notna().sum()
+        print(f"  DIVIPOLA matched: {n_matched:,}/{len(refpop):,} contracts", flush=True)
+    else:
+        refpop["codigo_divipola"] = None
+        print("  DIVIPOLA crosswalk not found, skipping", flush=True)
+
+    print(f"  Mandato contracts: {refpop['is_mandato'].sum():,}", flush=True)
+    print(f"  EICE contracts: {refpop['is_eice'].sum():,}", flush=True)
+    print(f"  Consortium contracts: {refpop['is_consortium'].sum():,}", flush=True)
+    print(f"  Cohort distribution:", flush=True)
+    print(refpop["cohort_key"].value_counts().to_string(), flush=True)
+    print(f"  Object category distribution:", flush=True)
+    print(refpop["object_category"].value_counts().to_string(), flush=True)
 
     return refpop
 

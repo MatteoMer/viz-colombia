@@ -5,6 +5,7 @@ Each signal is saved as a separate parquet under data/signals/.
 """
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -54,9 +55,14 @@ def signal_stall(refpop: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFrame:
     # For the 182 cohort contracts: use detailed timeline
     # For the rest of refpop: use simplified stall metric
 
+    # Filter to contracts with recorded payments (vp>0)
+    vp_positive_ids = set(refpop[refpop["valor_pagado"].fillna(0) > 0]["contract_id"])
+
     # --- Detailed stall for cohort contracts ---
     cohort_stall = []
     for cid, group in progress.sort_values("month").groupby("contract_id"):
+        if cid not in vp_positive_ids:
+            continue
         pcts = group["declared_progress_pct"].values
         statuses = group["active_status"].values
 
@@ -86,12 +92,16 @@ def signal_stall(refpop: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFrame:
             "stall_source": "detailed",
         })
 
-    detailed = pd.DataFrame(cohort_stall)
+    detailed = pd.DataFrame(cohort_stall) if cohort_stall else pd.DataFrame(
+        columns=["contract_id", "months_flat_while_active", "declared_progress_pct_current", "stall_source"]
+    )
 
     # --- Simplified stall for all refpop ---
     # Active contracts with low payment ratio relative to elapsed time
+    # Restricted to contracts with recorded payments (vp>0)
     active_mask = ~refpop["status_raw"].isin(["Cerrado", "terminado", "Cancelado"])
-    active = refpop[active_mask & (refpop["progress_pct"] < 0.95)].copy()
+    has_payment = refpop["valor_pagado"].fillna(0) > 0
+    active = refpop[active_mask & (refpop["progress_pct"] < 0.95) & has_payment].copy()
 
     # Months since start with no/low payment = simplified "months_flat"
     # If progress is < 10% and contract has been running > 12 months, flag
@@ -126,17 +136,23 @@ def signal_stall(refpop: pd.DataFrame, progress: pd.DataFrame) -> pd.DataFrame:
     # Percentile within all stall-eligible contracts
     stall["stall_percentile"] = percentile_rank(stall["stall_score"])
 
+    # Ensure numeric dtypes after concat
+    for col in ["months_flat_while_active", "declared_progress_pct_current", "stall_score", "stall_percentile"]:
+        stall[col] = pd.to_numeric(stall[col], errors="coerce")
+
     out = stall[["contract_id", "months_flat_while_active",
                  "declared_progress_pct_current", "stall_score", "stall_percentile"]]
     out.to_parquet(SIGNALS_DIR / "s1_stall.parquet", index=False, compression="zstd")
     report_signal("S1 Stall", out, "stall_score", threshold=100)
+    print(f"  S1 evaluated (vp>0): {len(out):,}", flush=True)
+    print(f"  S1 not evaluated (vp=0): {len(refpop) - len(out):,}", flush=True)
     return out
 
 
 # ===================================================================
 # Signal 4.2 — Value Creep
 # ===================================================================
-def signal_value_creep(refpop: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def signal_value_creep(refpop: pd.DataFrame, decomposed: pd.DataFrame | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     print("\n[S2] Value Creep", flush=True)
 
     # Get process estimated values (deduplicated)
@@ -167,19 +183,46 @@ def signal_value_creep(refpop: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
     report_signal("S2 Value Creep (contract)", contract_creep, "value_creep_ratio", threshold=0.3)
 
     # Contractor-level: value-weighted mean
-    rp["weighted_creep"] = rp["value_creep_ratio"] * rp["awarded_value_cop"]
-    contractor = rp.groupby("supplier_id").agg(
-        portfolio_creep_ratio_num=("weighted_creep", "sum"),
-        portfolio_total_value=("awarded_value_cop", "sum"),
-        n_contracts_weighted=("contract_id", "count"),
-    ).reset_index()
+    # Use decomposed view if available (member-level portfolios)
+    if decomposed is not None and "effective_supplier_id" in decomposed.columns:
+        # Join creep ratios to decomposed view
+        creep_map = rp.set_index("contract_id")["value_creep_ratio"]
+        dec = decomposed.copy()
+        dec["value_creep_ratio"] = dec["contract_id"].map(creep_map)
+        dec = dec[dec["value_creep_ratio"].notna()].copy()
+        dec["weighted_creep"] = dec["value_creep_ratio"] * dec["effective_value_cop"]
+        contractor = dec.groupby("effective_supplier_id").agg(
+            portfolio_creep_ratio_num=("weighted_creep", "sum"),
+            portfolio_total_value=("effective_value_cop", "sum"),
+            n_contracts_weighted=("contract_id", "count"),
+        ).reset_index().rename(columns={"effective_supplier_id": "supplier_id"})
+    else:
+        rp["weighted_creep"] = rp["value_creep_ratio"] * rp["awarded_value_cop"]
+        contractor = rp.groupby("supplier_id").agg(
+            portfolio_creep_ratio_num=("weighted_creep", "sum"),
+            portfolio_total_value=("awarded_value_cop", "sum"),
+            n_contracts_weighted=("contract_id", "count"),
+        ).reset_index()
     contractor["portfolio_creep_ratio"] = (
         contractor["portfolio_creep_ratio_num"] / contractor["portfolio_total_value"]
     )
     contractor = contractor[contractor["n_contracts_weighted"] >= 2]
     contractor["creep_percentile"] = percentile_rank(contractor["portfolio_creep_ratio"])
 
-    contractor[["supplier_id", "portfolio_creep_ratio", "n_contracts_weighted", "creep_percentile"]].to_parquet(
+    # Count-weighted (simple mean) portfolio creep ratio
+    if decomposed is not None and "effective_supplier_id" in decomposed.columns:
+        contractor_count = dec.groupby("effective_supplier_id").agg(
+            portfolio_creep_ratio_count=("value_creep_ratio", "mean"),
+        ).reset_index().rename(columns={"effective_supplier_id": "supplier_id"})
+    else:
+        contractor_count = rp.groupby("supplier_id").agg(
+            portfolio_creep_ratio_count=("value_creep_ratio", "mean"),
+        ).reset_index()
+    contractor_count = contractor_count[contractor_count["supplier_id"].isin(contractor["supplier_id"])]
+    contractor = contractor.merge(contractor_count, on="supplier_id", how="left")
+
+    contractor[["supplier_id", "portfolio_creep_ratio", "portfolio_creep_ratio_count",
+                "n_contracts_weighted", "creep_percentile"]].to_parquet(
         SIGNALS_DIR / "s2_value_creep_contractor.parquet", index=False, compression="zstd"
     )
     report_signal("S2 Value Creep (contractor)", contractor, "portfolio_creep_ratio", threshold=0.3)
@@ -190,7 +233,7 @@ def signal_value_creep(refpop: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame
 # ===================================================================
 # Signal 4.3 — Schedule Slippage
 # ===================================================================
-def signal_slippage(refpop: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def signal_slippage(refpop: pd.DataFrame, decomposed: pd.DataFrame | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     print("\n[S3] Schedule Slippage", flush=True)
 
     rp = refpop[refpop["original_duration_days"] > 30].copy()  # Skip very short contracts
@@ -208,20 +251,46 @@ def signal_slippage(refpop: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     report_signal("S3 Slippage (contract)", contract_slip, "slippage_ratio", threshold=0.5)
 
     # Contractor-level: value-weighted mean
-    rp_valid = rp[rp["awarded_value_cop"] > 0].copy()
-    rp_valid["weighted_slip"] = rp_valid["slippage_ratio"] * rp_valid["awarded_value_cop"]
-    contractor = rp_valid.groupby("supplier_id").agg(
-        portfolio_slip_num=("weighted_slip", "sum"),
-        portfolio_total_value=("awarded_value_cop", "sum"),
-        n_contracts=("contract_id", "count"),
-    ).reset_index()
+    # Use decomposed view if available (member-level portfolios)
+    if decomposed is not None and "effective_supplier_id" in decomposed.columns:
+        slip_map = rp.set_index("contract_id")["slippage_ratio"]
+        dec = decomposed.copy()
+        dec["slippage_ratio"] = dec["contract_id"].map(slip_map)
+        dec = dec[dec["slippage_ratio"].notna() & (dec["effective_value_cop"] > 0)].copy()
+        dec["weighted_slip"] = dec["slippage_ratio"] * dec["effective_value_cop"]
+        contractor = dec.groupby("effective_supplier_id").agg(
+            portfolio_slip_num=("weighted_slip", "sum"),
+            portfolio_total_value=("effective_value_cop", "sum"),
+            n_contracts=("contract_id", "count"),
+        ).reset_index().rename(columns={"effective_supplier_id": "supplier_id"})
+    else:
+        rp_valid = rp[rp["awarded_value_cop"] > 0].copy()
+        rp_valid["weighted_slip"] = rp_valid["slippage_ratio"] * rp_valid["awarded_value_cop"]
+        contractor = rp_valid.groupby("supplier_id").agg(
+            portfolio_slip_num=("weighted_slip", "sum"),
+            portfolio_total_value=("awarded_value_cop", "sum"),
+            n_contracts=("contract_id", "count"),
+        ).reset_index()
     contractor["portfolio_slippage_ratio"] = (
         contractor["portfolio_slip_num"] / contractor["portfolio_total_value"]
     )
     contractor = contractor[contractor["n_contracts"] >= 2]
     contractor["slippage_percentile"] = percentile_rank(contractor["portfolio_slippage_ratio"])
 
-    contractor[["supplier_id", "portfolio_slippage_ratio", "n_contracts", "slippage_percentile"]].to_parquet(
+    # Count-weighted (simple mean) portfolio slippage ratio
+    if decomposed is not None and "effective_supplier_id" in decomposed.columns:
+        contractor_count = dec.groupby("effective_supplier_id").agg(
+            portfolio_slippage_ratio_count=("slippage_ratio", "mean"),
+        ).reset_index().rename(columns={"effective_supplier_id": "supplier_id"})
+    else:
+        contractor_count = rp_valid.groupby("supplier_id").agg(
+            portfolio_slippage_ratio_count=("slippage_ratio", "mean"),
+        ).reset_index()
+    contractor_count = contractor_count[contractor_count["supplier_id"].isin(contractor["supplier_id"])]
+    contractor = contractor.merge(contractor_count, on="supplier_id", how="left")
+
+    contractor[["supplier_id", "portfolio_slippage_ratio", "portfolio_slippage_ratio_count",
+                "n_contracts", "slippage_percentile"]].to_parquet(
         SIGNALS_DIR / "s3_slippage_contractor.parquet", index=False, compression="zstd"
     )
     report_signal("S3 Slippage (contractor)", contractor, "portfolio_slippage_ratio", threshold=0.5)
@@ -235,16 +304,13 @@ def signal_slippage(refpop: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 def signal_bunching(refpop: pd.DataFrame) -> pd.DataFrame:
     print("\n[S4] Threshold Bunching", flush=True)
 
-    # Simplified approach: use national SMMLV-based thresholds
-    # 2024 SMMLV = 1,300,000 COP
-    # Menor cuantía upper: ~280 SMMLV = 364M COP (varies by entity size)
-    # Mínima cuantía upper: 10% of menor cuantía = 36.4M COP
-    # Using fixed thresholds for simplicity (documented in methodology)
-    SMMLV = 1_300_000
-    thresholds = {
-        "minima_cuantia": int(28 * SMMLV),       # ~36.4M COP
-        "menor_cuantia_low": int(280 * SMMLV),    # ~364M COP
-        "menor_cuantia_high": int(1000 * SMMLV),  # ~1.3B COP
+    # Year-specific SMMLV (Salario Mínimo Mensual Legal Vigente)
+    SMMLV_BY_YEAR = {
+        2020: 877_803,
+        2021: 908_526,
+        2022: 1_000_000,
+        2023: 1_160_000,
+        2024: 1_300_000,
     }
 
     # Use ALL contract types for bunching (not just Obra), per entity per year
@@ -264,20 +330,42 @@ def signal_bunching(refpop: pd.DataFrame) -> pd.DataFrame:
         if n < 5:  # Need enough contracts for meaningful bunching
             continue
 
+        smmlv = SMMLV_BY_YEAR.get(year, 1_300_000)
+        thresholds = {
+            "minima_cuantia": int(28 * smmlv),
+            "menor_cuantia_low": int(280 * smmlv),
+            "menor_cuantia_high": int(1000 * smmlv),
+        }
+
         for tname, T in thresholds.items():
             below = ((values >= 0.85 * T) & (values < T)).sum()
             above = ((values > T) & (values <= 1.15 * T)).sum()
-            bunching_ratio = below / max(above, 1)
+            observed_ratio = below / max(above, 1)
+
+            # Permutation null model (Fix 7)
+            n_perms = 500
+            rng = np.random.default_rng(seed=hash((entity, year, tname)) % (2**31))
+            null_ratios = np.empty(n_perms)
+            for p in range(n_perms):
+                perm_values = rng.permutation(values)
+                p_below = ((perm_values >= 0.85 * T) & (perm_values < T)).sum()
+                p_above = ((perm_values > T) & (perm_values <= 1.15 * T)).sum()
+                null_ratios[p] = p_below / max(p_above, 1)
+            p_value = (null_ratios >= observed_ratio).mean()
 
             rows.append({
                 "entity_nit": entity,
                 "year": year,
                 "threshold_name": tname,
                 "threshold_value": T,
-                "bunching_ratio": bunching_ratio,
+                "smmlv_used": smmlv,
+                "bunching_ratio": observed_ratio,
                 "n_below": int(below),
                 "n_above": int(above),
                 "n_contracts_in_window": n,
+                "bunching_p_value": float(p_value),
+                "bunching_significant": bool(p_value < 0.05),
+                "null_ratio_mean": float(null_ratios.mean()),
             })
 
     bunching = pd.DataFrame(rows)
@@ -303,7 +391,7 @@ def signal_bunching(refpop: pd.DataFrame) -> pd.DataFrame:
 # ===================================================================
 # Signal 4.5 — Contractor Concentration (HHI)
 # ===================================================================
-def signal_concentration(refpop: pd.DataFrame) -> pd.DataFrame:
+def signal_concentration(refpop: pd.DataFrame, decomposed: pd.DataFrame | None = None) -> pd.DataFrame:
     print("\n[S5] Contractor Concentration", flush=True)
 
     # Use ALL contract types for concentration
@@ -313,6 +401,42 @@ def signal_concentration(refpop: pd.DataFrame) -> pd.DataFrame:
                  "contract_signature_date"],
     )
 
+    # If decomposed view available, build supplier_id -> effective_supplier_id mapping
+    # and apply to all_contracts that are consortium contracts
+    if decomposed is not None and "effective_supplier_id" in decomposed.columns:
+        # Build a mapping for consortium expansion from the decomposed refpop
+        # For the full all_contracts, we can only decompose refpop contracts
+        # Expand refpop consortium contracts, keep all_contracts non-refpop as-is
+        dec_rows = decomposed[["contract_id", "effective_supplier_id", "effective_value_cop"]].copy()
+        # Replace refpop rows in all_contracts with decomposed rows
+        refpop_ids = set(decomposed["contract_id"])
+        non_refpop = all_contracts[~all_contracts.index.isin(
+            all_contracts.index  # placeholder, we need contract_id
+        )].copy()
+        # Since all_contracts doesn't have contract_id, we apply decomposition
+        # only to the HHI computation within refpop scope
+        # Simpler approach: compute HHI using effective_supplier_id from refpop only
+        print("  Using decomposed view for HHI computation", flush=True)
+        # Build entity-supplier-value from decomposed refpop
+        dec_for_hhi = decomposed[["entity_nit", "effective_supplier_id",
+                                   "effective_value_cop"]].copy()
+        dec_for_hhi = dec_for_hhi.rename(columns={
+            "effective_supplier_id": "supplier_id",
+            "effective_value_cop": "awarded_value_cop",
+        })
+        # Also need contract_signature_date from refpop
+        date_map = refpop.set_index("contract_id")["contract_signature_date"]
+        decomposed_with_date = decomposed.copy()
+        decomposed_with_date["contract_signature_date"] = decomposed_with_date["contract_id"].map(date_map)
+        all_contracts_for_hhi = pd.DataFrame({
+            "entity_nit": decomposed_with_date["entity_nit"],
+            "supplier_id": decomposed_with_date["effective_supplier_id"],
+            "awarded_value_cop": decomposed_with_date["effective_value_cop"],
+            "contract_signature_date": decomposed_with_date["contract_signature_date"],
+        })
+    else:
+        all_contracts_for_hhi = all_contracts
+
     # Rolling 12-month windows ending each quarter-end
     windows = pd.date_range("2020-03-31", "2024-12-31", freq="QE", tz="UTC")
 
@@ -320,10 +444,10 @@ def signal_concentration(refpop: pd.DataFrame) -> pd.DataFrame:
     for w_end in windows:
         w_start = w_end - pd.DateOffset(months=12)
         mask = (
-            (all_contracts["contract_signature_date"] >= w_start)
-            & (all_contracts["contract_signature_date"] <= w_end)
+            (all_contracts_for_hhi["contract_signature_date"] >= w_start)
+            & (all_contracts_for_hhi["contract_signature_date"] <= w_end)
         )
-        window_df = all_contracts[mask]
+        window_df = all_contracts_for_hhi[mask]
 
         for entity, egroup in window_df.groupby("entity_nit"):
             total_val = egroup["awarded_value_cop"].sum()
@@ -471,6 +595,7 @@ def signal_award_speed() -> pd.DataFrame:
     procs = read_parquet_dir(PARQUET_DIR / "processes", columns=[
         "process_id", "estimated_value_cop", "procurement_method_norm",
         "publication_date", "award_date", "category_code", "contract_type_raw",
+        "entity_level",
     ])
 
     # Filter: Obra, with both dates, 2020-2024
@@ -494,7 +619,11 @@ def signal_award_speed() -> pd.DataFrame:
     # UNSPSC 4-digit category
     procs["cat4"] = procs["category_code"].str.extract(r"V1\.(\d{4})", expand=False).fillna("0000")
 
-    # Simple OLS: log(days) ~ log(value) + method + year
+    # Entity level covariate
+    procs["entity_level"] = procs["entity_level"].fillna("Territorial")
+    entity_dummies = pd.get_dummies(procs["entity_level"], prefix="entlvl", dtype=float)
+
+    # Simple OLS: log(days) ~ log(value) + method + year + entity_level
     # Using dummy encoding
     method_dummies = pd.get_dummies(procs["procurement_method_norm"], prefix="method", dtype=float)
     year_dummies = pd.get_dummies(procs["pub_year"], prefix="year", dtype=float)
@@ -503,6 +632,7 @@ def signal_award_speed() -> pd.DataFrame:
         procs[["log_value"]],
         method_dummies.iloc[:, :-1],  # Drop one for intercept
         year_dummies.iloc[:, :-1],
+        entity_dummies.iloc[:, :-1],
     ], axis=1).values
 
     # Add intercept
@@ -549,7 +679,7 @@ def signal_award_speed() -> pd.DataFrame:
 # ===================================================================
 # Signal 4.8 — Contractor-Entity Relationship Intensity
 # ===================================================================
-def signal_relationships() -> pd.DataFrame:
+def signal_relationships(decomposed: pd.DataFrame | None = None) -> pd.DataFrame:
     print("\n[S8] Contractor-Entity Relationship Intensity", flush=True)
 
     contracts = read_parquet_dir(PARQUET_DIR / "contracts", columns=[
@@ -570,6 +700,20 @@ def signal_relationships() -> pd.DataFrame:
     # Remove negative/zero values
     c = c[c["awarded_value_cop"] > 0]
     print(f"  Obra contracts 2022-2024 with valid supplier: {len(c):,}", flush=True)
+
+    # If decomposed view available, use effective_supplier_id for edge building
+    if decomposed is not None and "effective_supplier_id" in decomposed.columns:
+        print("  Using decomposed view for relationship edges", flush=True)
+        dec = decomposed[["entity_nit", "effective_supplier_id", "effective_value_cop"]].copy()
+        dec = dec[dec["effective_supplier_id"].notna() &
+                  (dec["effective_supplier_id"] != "No Definido") &
+                  (dec["effective_supplier_id"] != "") &
+                  (dec["effective_value_cop"] > 0)]
+        dec = dec.rename(columns={
+            "effective_supplier_id": "supplier_id",
+            "effective_value_cop": "awarded_value_cop",
+        })
+        c = dec
 
     # Build edge weights
     edges = c.groupby(["entity_nit", "supplier_id"]).agg(
@@ -619,6 +763,128 @@ def signal_relationships() -> pd.DataFrame:
     return out
 
 
+# ===================================================================
+# Signal 4.9 — Contract Fragmentation
+# ===================================================================
+
+STOPWORDS_ES = frozenset(
+    "de la el en para con del los las por al un una se que es su a y o como "
+    "más este esta estos estas entre sobre sin hasta desde cada todo ante bajo "
+    "contra durante mediante según hacia tras no lo le nos les ni".split()
+)
+
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase tokenization minus Spanish stopwords."""
+    if not isinstance(text, str):
+        return set()
+    words = text.lower().split()
+    return {w for w in words if len(w) > 2 and w not in STOPWORDS_ES}
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+GEO_RE = re.compile(
+    r"\b(?:vereda|barrio|corregimiento|sector|kilometro|km|tramo|via|calle|carrera)\b"
+    r"|(?:municipio|muni(?:cipal)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_geo_tokens(text: str) -> set[str]:
+    """Extract location-related tokens from description."""
+    if not isinstance(text, str):
+        return set()
+    words = text.lower().split()
+    geo = set()
+    for i, w in enumerate(words):
+        if GEO_RE.search(w):
+            geo.add(w)
+            # Add next word as the place name
+            if i + 1 < len(words):
+                geo.add(words[i + 1])
+    return geo
+
+
+def signal_fragmentation(refpop: pd.DataFrame, decomposed: pd.DataFrame | None = None) -> pd.DataFrame:
+    print("\n[S9] Contract Fragmentation", flush=True)
+
+    # Use decomposed view if available (splits by effective member)
+    if decomposed is not None and "effective_supplier_id" in decomposed.columns:
+        print("  Using decomposed view for fragmentation grouping", flush=True)
+        # Need object_description and awarded_value_cop from the decomposed view
+        frag_df = decomposed.copy()
+        frag_df["supplier_id"] = frag_df["effective_supplier_id"]
+        frag_df["awarded_value_cop"] = frag_df["effective_value_cop"]
+    else:
+        frag_df = refpop
+
+    # Group by (entity, supplier, year) — need ≥3 contracts
+    group_cols = ["entity_nit", "supplier_id", "signature_year"]
+    counts = frag_df.groupby(group_cols)["contract_id"].count()
+    eligible = counts[counts >= 3].reset_index()
+    eligible.rename(columns={"contract_id": "n_contracts"}, inplace=True)
+
+    rows = []
+    for _, meta in eligible.iterrows():
+        mask = (
+            (frag_df["entity_nit"] == meta["entity_nit"])
+            & (frag_df["supplier_id"] == meta["supplier_id"])
+            & (frag_df["signature_year"] == meta["signature_year"])
+        )
+        group = frag_df[mask]
+        n = len(group)
+        values = group["awarded_value_cop"]
+
+        # Coefficient of variation
+        cv_value = values.std() / values.mean() if values.mean() > 0 else 0.0
+
+        # Tokenize descriptions
+        tokens_list = [_tokenize(desc) for desc in group["object_description"]]
+
+        # Max pairwise Jaccard similarity
+        object_similarity = 0.0
+        for i in range(len(tokens_list)):
+            for j in range(i + 1, len(tokens_list)):
+                s = _jaccard(tokens_list[i], tokens_list[j])
+                if s > object_similarity:
+                    object_similarity = s
+
+        # Geo overlap: mean pairwise Jaccard
+        geo_tokens_list = [_extract_geo_tokens(desc) for desc in group["object_description"]]
+        geo_sims = []
+        for i in range(len(geo_tokens_list)):
+            for j in range(i + 1, len(geo_tokens_list)):
+                geo_sims.append(_jaccard(geo_tokens_list[i], geo_tokens_list[j]))
+        geo_overlap = np.mean(geo_sims) if geo_sims else 0.0
+
+        fragmentation_score = n * (1 / max(cv_value, 0.1)) * max(object_similarity, geo_overlap)
+
+        rows.append({
+            "entity_nit": meta["entity_nit"],
+            "supplier_id": meta["supplier_id"],
+            "year": int(meta["signature_year"]),
+            "n_contracts": n,
+            "cv_value": cv_value,
+            "object_similarity": object_similarity,
+            "geo_overlap": geo_overlap,
+            "fragmentation_score": fragmentation_score,
+        })
+
+    frag = pd.DataFrame(rows)
+    frag.to_parquet(SIGNALS_DIR / "s9_fragmentation.parquet", index=False, compression="zstd")
+
+    print(f"  Total entity-supplier-year groups (>=3): {len(frag):,}", flush=True)
+    if len(frag) > 0:
+        report_signal("S9 Fragmentation", frag, "fragmentation_score")
+
+    return frag
+
+
 def main():
     print("=" * 60, flush=True)
     print("PHASE 4 — SIGNAL CONSTRUCTION", flush=True)
@@ -632,15 +898,29 @@ def main():
     # Load declared progress (for s1)
     progress = pd.read_parquet(DATA_DIR / "declared_progress.parquet")
 
+    # Build decomposed view for consortium signals
+    decomposed = None
+    try:
+        from consortium_decompose import load_consortium_members, build_decomposed_view
+        consortium_members = load_consortium_members()
+        if consortium_members is not None:
+            decomposed = build_decomposed_view(refpop, consortium_members)
+            print(f"  Decomposed view: {len(decomposed):,} rows", flush=True)
+        else:
+            print("  No consortium member data found, running without decomposition", flush=True)
+    except ImportError:
+        print("  consortium_decompose not available, running without decomposition", flush=True)
+
     # Run all signals
     s1 = signal_stall(refpop, progress)
-    s2_c, s2_k = signal_value_creep(refpop)
-    s3_c, s3_k = signal_slippage(refpop)
+    s2_c, s2_k = signal_value_creep(refpop, decomposed=decomposed)
+    s3_c, s3_k = signal_slippage(refpop, decomposed=decomposed)
     s4 = signal_bunching(refpop)
-    s5 = signal_concentration(refpop)
+    s5 = signal_concentration(refpop, decomposed=decomposed)
     s6 = signal_single_bidder()
     s7 = signal_award_speed()
-    s8 = signal_relationships()
+    s8 = signal_relationships(decomposed=decomposed)
+    s9 = signal_fragmentation(refpop, decomposed=decomposed)
 
     print(f"\n{'=' * 60}", flush=True)
     print("PHASE 4 COMPLETE", flush=True)

@@ -14,5 +14,12 @@ __pycache__/
 *.pyc
 .venv/
 
+# Large raw files
+data/covariates/raw/consortium_members.json
+
+# Dashboard
+dashboard/node_modules/
+dashboard/dist/
+
 # OS
 .DS_Store

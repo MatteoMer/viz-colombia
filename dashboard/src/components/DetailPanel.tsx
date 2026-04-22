@@ -1,8 +1,9 @@
 import { motion } from "framer-motion";
-import type { Contract } from "../types";
+import type { Contract, CampaignDonor } from "../types";
 import { fmtCop, fmtUsd, titleCase, scoreBadgeClass, SIGNAL_LABELS, SIGNAL_DESCRIPTIONS, SIGNAL_CATS } from "../utils";
 import { Tooltip } from "./Tooltip";
 import { ContextCardComponent } from "./ContextCard";
+import { DonorGraph } from "./DonorGraph";
 
 const DQ_FLAG_LABELS: Record<string, string> = {
   natural_person_mega: "Natural person (C\u00e9dula) awarded >500M COP \u2014 likely a data-entry error in contract value.",
@@ -207,6 +208,20 @@ export function DetailPanel({
                 </p>
               )}
             </Section>
+
+            {/* Campaign Finance */}
+            {c.donor && typeof c.donor === "object" && (
+              <Section title="CAMPAIGN FINANCE LINK" id="donor">
+                <DonorGraph
+                  supplierName={c.supplier}
+                  supplierNit={c.supplier_nit}
+                  donor={c.donor as CampaignDonor}
+                  entityName={c.entity}
+                  entityNit={c.entity_nit}
+                  onViewPortfolio={onViewPortfolio}
+                />
+              </Section>
+            )}
 
             {/* Signals */}
             {!c.dq_excluded && c.z && (

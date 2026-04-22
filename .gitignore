@@ -20,6 +20,7 @@ data/covariates/raw/consortium_members.json
 # Dashboard
 dashboard/node_modules/
 dashboard/dist/
+dashboard/.vite/
 
 # OS
 .DS_Store

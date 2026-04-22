@@ -106,6 +106,14 @@ export function KPICards({ kpi, dots }: { kpi: KPI; dots?: Dot[] }) {
           </ResponsiveContainer>
         ) : undefined}
       />
+      {kpi.n_donor_linked != null && kpi.n_donor_linked > 0 && (
+        <Card
+          accent="#f0a878"
+          number={fmtNum(kpi.n_donor_linked)}
+          label="DONOR-LINKED"
+          sub="Contracts awarded to 2019 campaign donors"
+        />
+      )}
     </div>
   );
 }

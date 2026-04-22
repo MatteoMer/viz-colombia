@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import type { Contractor } from "../types";
 import { fmtCop, scoreBadgeClass } from "../utils";
+import { Tooltip } from "./Tooltip";
 
 type SortKey = "name" | "n" | "flagged" | "exposure" | "composite" | "signals";
 
@@ -59,7 +60,16 @@ export function ContractorsView({ contractors }: { contractors: Contractor[] }) 
             {sorted.map((c) => (
               <tr key={c.id} className="table-row-hover transition-colors">
                 <td className="px-3 py-1.5 border-b border-[#1a1a22]/50 text-[#888890] max-w-[280px] truncate" title={c.name}>
-                  {c.name}
+                  <span className="inline-flex items-center gap-1.5">
+                    {c.name}
+                    {c.donor && (
+                      <Tooltip text={`Campaign donor: ${c.donor.candidates} (${c.donor.positions}). Total donated: COP ${c.donor.total.toLocaleString()}`}>
+                        <span className="inline-block px-1 py-0 border border-[#f0a878]/40 bg-[#f0a878]/15 font-mono text-[7px] font-bold text-[#f0a878] uppercase tracking-wider cursor-help shrink-0">
+                          DONOR
+                        </span>
+                      </Tooltip>
+                    )}
+                  </span>
                 </td>
                 <td className="px-3 py-1.5 border-b border-[#1a1a22]/50 text-right tabular-nums text-[#555560]">
                   {c.n}

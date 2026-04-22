@@ -422,7 +422,8 @@ def _trim_cards(raw_cards):
 
 
 def build_contracts(scored, refpop, demo, muni_lookup,
-                    context_cards=None, muni_covariates=None):
+                    context_cards=None, muni_covariates=None,
+                    campaign_contractors=None):
     """Build slim dots for ALL contracts and full details."""
 
     if context_cards is None:
@@ -490,6 +491,11 @@ def build_contracts(scored, refpop, demo, muni_lookup,
     cat_price = merged["_cat_pricing"].values
     cat_rel = merged["_cat_relationships"].values
 
+    # Campaign donor flag
+    if campaign_contractors is None:
+        campaign_contractors = set()
+    supplier_ids = merged["supplier_id"].fillna("").values if "supplier_id" in merged.columns else np.full(len(cids), "")
+
     dots = []
     for i in range(len(cids)):
         dept = depts[i]
@@ -508,7 +514,7 @@ def build_contracts(scored, refpop, demo, muni_lookup,
         else:
             continue
 
-        dots.append({
+        dot = {
             "i": cid,
             "a": round(lat, 4),
             "o": round(lon, 4),
@@ -523,7 +529,10 @@ def build_contracts(scored, refpop, demo, muni_lookup,
             "cc": sf(cat_comp[i], 2),
             "cp": sf(cat_price[i], 2),
             "cr": sf(cat_rel[i], 2),
-        })
+        }
+        if supplier_ids[i] in campaign_contractors:
+            dot["dn"] = 1  # campaign donor flag
+        dots.append(dot)
 
     print(f"  Dots: {len(dots):,} contracts with coordinates", flush=True)
 
@@ -548,7 +557,7 @@ def build_contracts(scored, refpop, demo, muni_lookup,
     return dots, merged_slim, context_cards, muni_covariates
 
 
-def write_details_json(out_path, merged, context_cards, muni_covariates):
+def write_details_json(out_path, merged, context_cards, muni_covariates, campaign_links=None):
     """Write details.json by streaming, avoiding huge in-memory dict."""
     z_cols = list(Z_MAP.keys())
     z_global_cols = list(Z_GLOBAL_MAP.keys())
@@ -618,6 +627,8 @@ def write_details_json(out_path, merged, context_cards, muni_covariates):
             divipola = getattr(row, "codigo_divipola", None)
             if divipola and pd.notna(divipola) and str(divipola) in muni_covariates:
                 detail["ctx"] = muni_covariates[str(divipola)]
+            if campaign_links and cid in campaign_links:
+                detail["donor"] = campaign_links[cid]
 
             if not first:
                 f.write(",")
@@ -632,16 +643,29 @@ def write_details_json(out_path, merged, context_cards, muni_covariates):
     print(f"  Written {out_path} ({out_path.stat().st_size // 1024} KB)", flush=True)
 
 
-def prepare_contractors(dk):
-    return [{
-        "id": r["supplier_id"],
-        "name": str(r.get("supplier_name", ""))[:100],
-        "composite": sf(r["portfolio_composite"]),
-        "n": int(r["n_contracts_active"]),
-        "exposure": si(r["total_exposure_cop"]),
-        "flagged": int(r["n_flagged"]),
-        "signals": str(r.get("top_2_signals", "")),
-    } for _, r in dk.iterrows()]
+def prepare_contractors(dk, campaign_donor_map=None):
+    if campaign_donor_map is None:
+        campaign_donor_map = {}
+    result = []
+    for _, r in dk.iterrows():
+        c = {
+            "id": r["supplier_id"],
+            "name": str(r.get("supplier_name", ""))[:100],
+            "composite": sf(r["portfolio_composite"]),
+            "n": int(r["n_contracts_active"]),
+            "exposure": si(r["total_exposure_cop"]),
+            "flagged": int(r["n_flagged"]),
+            "signals": str(r.get("top_2_signals", "")),
+        }
+        if r["supplier_id"] in campaign_donor_map:
+            d = campaign_donor_map[r["supplier_id"]]
+            c["donor"] = {
+                "total": d["total_donated"],
+                "candidates": d["candidates"],
+                "positions": d["positions"],
+            }
+        result.append(c)
+    return result
 
 
 def prepare_departments(dept_stats):
@@ -670,6 +694,59 @@ def main():
     demo = pd.read_parquet(DATA_DIR / "demo_cohort.parquet")
     contractors = pd.read_parquet(DATA_DIR / "demo_contractors.parquet")
     print(f"  Loaded {len(refpop):,} refpop, {len(demo)} demo, {len(contractors)} contractors", flush=True)
+
+    # Load campaign finance links (graceful if absent)
+    campaign_links: dict[str, dict] = {}  # contract_id → donor info
+    campaign_contractors: set[str] = set()  # supplier_ids that are donors
+    campaign_donor_map: dict[str, dict] = {}  # supplier_id → donor summary
+    donor_links_path = DATA_DIR / "campaign_donor_links.parquet"
+    donor_summary_path = DATA_DIR / "campaign_donors.parquet"
+    candidates_detail_path = DATA_DIR / "campaign_candidates_detail.parquet"
+
+    # Per-donor per-candidate structured detail (for relationship graph)
+    candidates_by_donor: dict[str, list[dict]] = {}  # donor_id_norm → [{name, position, party, donated}]
+    if candidates_detail_path.exists():
+        cd = pd.read_parquet(candidates_detail_path)
+        for _, r in cd.iterrows():
+            did = r["donor_id_norm"]
+            candidates_by_donor.setdefault(did, []).append({
+                "name": str(r.get("candidate_name", ""))[:80],
+                "position": str(r.get("position", "")),
+                "party": str(r.get("party", "")),
+                "donated": int(r.get("donated", 0)),
+            })
+        print(f"  Loaded per-candidate detail for {len(candidates_by_donor):,} donors", flush=True)
+
+    if donor_links_path.exists():
+        dl = pd.read_parquet(donor_links_path)
+        for _, r in dl.iterrows():
+            link: dict = {
+                "donor_name": str(r.get("donor_name", ""))[:80],
+                "donor_type": str(r.get("donor_type", "")),
+                "total_donated": int(r.get("total_donated_cop", 0)),
+                "n_candidates": int(r.get("n_candidates", 0)),
+                "candidates": str(r.get("candidates_funded", ""))[:200],
+                "positions": str(r.get("positions_funded", "")),
+                "parties": str(r.get("parties", "")),
+            }
+            # Attach per-candidate structured detail if available
+            supplier_norm = str(r.get("supplier_id", "")).strip().lstrip("0")
+            if supplier_norm in candidates_by_donor:
+                link["candidates_detail"] = candidates_by_donor[supplier_norm]
+            campaign_links[r["contract_id"]] = link
+            campaign_contractors.add(r["supplier_id"])
+        print(f"  Loaded campaign donor links for {len(campaign_links):,} contracts ({len(campaign_contractors)} contractors)", flush=True)
+    if donor_summary_path.exists():
+        ds = pd.read_parquet(donor_summary_path)
+        for _, r in ds.iterrows():
+            campaign_donor_map[r["supplier_id"]] = {
+                "donor_name": str(r.get("donor_name", ""))[:80],
+                "donor_type": str(r.get("donor_type", "")),
+                "total_donated": int(r.get("total_donated_cop", 0)),
+                "n_candidates": int(r.get("n_candidates", 0)),
+                "candidates": str(r.get("candidates_funded", ""))[:200],
+                "positions": str(r.get("positions_funded", "")),
+            }
 
     # Load context cards (graceful if absent)
     context_cards: dict[str, list[dict]] = {}
@@ -720,13 +797,14 @@ def main():
         scored, refpop, demo, muni_lookup,
         context_cards=context_cards,
         muni_covariates=muni_covariates,
+        campaign_contractors=campaign_contractors,
     )
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Write details to separate file (streamed to avoid OOM)
     print("  Writing details.json (streaming)...", flush=True)
-    write_details_json(OUT_DIR / "details.json", merged, cc, mc)
+    write_details_json(OUT_DIR / "details.json", merged, cc, mc, campaign_links)
 
     # Build slim contracts list for table from scored DataFrame directly
     print("  Building contracts list...", flush=True)
@@ -782,6 +860,8 @@ def main():
         if comp_adj != c["composite"]:
             c["composite_adj"] = comp_adj
             c["pctl_adj"] = sf(row.composite_adjusted_percentile, 3)
+        if cid in campaign_links:
+            c["donor"] = 1
         contracts_list.append(c)
 
     contracts_list.sort(key=lambda x: x["composite"], reverse=True)
@@ -880,12 +960,13 @@ def main():
             "n_dq_excluded": int(n_dq),
             "n_total": len(contracts_list),
             "n_context_shifted": n_context_shifted,
+            "n_donor_linked": len(campaign_links),
         },
         "departments": prepare_departments(dept_stats),
         "geojson": geojson,
         "dots": dots,
         "contracts": contracts_list,
-        "contractors": prepare_contractors(contractors),
+        "contractors": prepare_contractors(contractors, campaign_donor_map),
         "methodology": Path("METHODOLOGY.md").read_text(encoding="utf-8"),
     }
 

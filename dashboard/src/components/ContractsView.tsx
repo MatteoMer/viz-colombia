@@ -25,6 +25,7 @@ export function ContractsView({
   const [page, setPage] = useState(0);
   const [showDQ, setShowDQ] = useState(false);
   const [hideBenign, setHideBenign] = useState(false);
+  const [donorOnly, setDonorOnly] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const highlightRef = useRef<HTMLTableRowElement>(null);
 
@@ -53,6 +54,9 @@ export function ContractsView({
       list = list.filter((c) => c.supplier_nit === supplierFilter);
     } else {
       list = list.filter((c) => (showDQ ? c.dq_excluded : !c.dq_excluded));
+      if (donorOnly && !showDQ) {
+        list = list.filter((c) => !!c.donor);
+      }
       if (hideBenign && !showDQ) {
         list = list.filter((c) => {
           if (!c.cards || c.cards.length === 0) return true;
@@ -71,7 +75,7 @@ export function ContractsView({
         (c.muni && c.muni.toLowerCase().includes(q)) ||
         (c.desc && c.desc.toLowerCase().includes(q)),
     );
-  }, [contracts, query, showDQ, hideBenign, supplierFilter]);
+  }, [contracts, query, showDQ, hideBenign, donorOnly, supplierFilter]);
 
   const sorted = useMemo(() => {
     return [...filtered].sort((a, b) => {
@@ -144,6 +148,18 @@ export function ContractsView({
         </div>
         {!showDQ && (
           <button
+            onClick={() => { setDonorOnly(!donorOnly); setPage(0); }}
+            className={`font-mono text-[9px] px-2 py-0.5 font-medium shrink-0 border transition-colors uppercase tracking-wider ${
+              donorOnly
+                ? "bg-[#f0a878]/10 text-[#f0a878] border-[#f0a878]/30"
+                : "bg-transparent text-[#555560] border-[#1a1a22] hover:text-[#888890]"
+            }`}
+          >
+            {donorOnly ? "ALL" : "DONORS"}
+          </button>
+        )}
+        {!showDQ && (
+          <button
             onClick={() => { setHideBenign(!hideBenign); setPage(0); }}
             className={`font-mono text-[9px] px-2 py-0.5 font-medium shrink-0 border transition-colors uppercase tracking-wider ${
               hideBenign
@@ -203,7 +219,14 @@ export function ContractsView({
                   {c.entity}
                 </td>
                 <td className="px-3 py-1.5 border-b border-[#1a1a22]/50 text-[#888890] max-w-[180px] truncate" title={c.supplier}>
-                  {c.supplier}
+                  <span className="inline-flex items-center gap-1">
+                    {c.supplier}
+                    {c.donor && (
+                      <span className="inline-block px-1 py-0 border border-[#f0a878]/40 bg-[#f0a878]/15 font-mono text-[7px] font-bold text-[#f0a878] uppercase tracking-wider shrink-0">
+                        DONOR
+                      </span>
+                    )}
+                  </span>
                 </td>
                 <td className="px-3 py-1.5 border-b border-[#1a1a22]/50 text-[#555560]">
                   {titleCase(c.dept)}

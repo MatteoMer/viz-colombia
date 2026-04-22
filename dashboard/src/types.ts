@@ -7,6 +7,7 @@ export interface KPI {
   n_context_shifted?: number;
   n_contractors?: number;
   n_high_risk?: number;
+  n_donor_linked?: number;
 }
 
 export interface ContextCard {
@@ -34,6 +35,24 @@ export interface Department {
   flag_rate: number;
   exposure: number;
   composite: number;
+}
+
+export interface CampaignCandidateDetail {
+  name: string;
+  position: string;
+  party: string;
+  donated: number;
+}
+
+export interface CampaignDonor {
+  donor_name: string;
+  donor_type: string;
+  total_donated: number;
+  n_candidates: number;
+  candidates: string;
+  positions: string;
+  parties: string;
+  candidates_detail?: CampaignCandidateDetail[];
 }
 
 export interface Contract {
@@ -67,6 +86,13 @@ export interface Contract {
   ranking_unstable?: boolean;
   cards?: ContextCard[] | null;
   ctx?: MuniContext | null;
+  donor?: CampaignDonor | 1 | null;
+}
+
+export interface ContractorDonor {
+  total: number;
+  candidates: string;
+  positions: string;
 }
 
 export interface Contractor {
@@ -77,6 +103,7 @@ export interface Contractor {
   exposure: number;
   flagged: number;
   signals: string;
+  donor?: ContractorDonor | null;
 }
 
 /** Slim dot for ALL 28K contracts (map rendering) */
@@ -95,6 +122,7 @@ export interface Dot {
   cc: number; // competition category avg
   cp: number; // pricing category avg
   cr: number; // relationships category avg
+  dn?: number; // campaign donor flag (1=yes)
 }
 
 export interface FilterState {

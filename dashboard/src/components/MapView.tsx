@@ -254,6 +254,7 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
     highlightColor: [255, 255, 255, 100],
     stroked: true,
     getLineColor: (d) => {
+      if (d.dn) return [192, 132, 252, 220];
       const score = getDotCatScore(d, category);
       return isTopTier(score) ? [255, 255, 255, 200] : [0, 0, 0, 100];
     },
@@ -330,8 +331,9 @@ export const MapView = forwardRef<MapViewHandle, Props>(function MapView(
       if (info.layer?.id === "scatter") {
         const d = info.object as Dot;
         const score = getDotCatScore(d, category);
+        const donorBadge = d.dn ? `<span style="display:inline-block;padding:0 3px;border:1px solid rgba(240,168,120,0.4);background:rgba(240,168,120,0.15);color:#f0a878;font-size:9px;font-weight:700;letter-spacing:0.05em;margin-left:4px;vertical-align:middle">DONOR</span>` : "";
         return {
-          html: `<div style="font-weight:600;color:#e8e8f0">${d.e || d.i}</div>
+          html: `<div style="font-weight:600;color:#e8e8f0">${d.e || d.i}${donorBadge}</div>
             <div style="color:#7a7a90;font-size:11px">${titleCase(d.m)} &middot; ${fmtCop(d.v)}</div>
             <div style="color:#e8e8f0;font-size:11px;margin-top:3px">Score: <strong>${score.toFixed(2)}</strong></div>
             <div style="color:#7a7a90;font-size:10px;display:grid;grid-template-columns:auto auto;gap:0 8px;margin-top:2px">

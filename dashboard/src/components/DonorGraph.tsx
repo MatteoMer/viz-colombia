@@ -1,6 +1,6 @@
 import { useRef, useEffect, useMemo, useState, useLayoutEffect } from "react";
 import { motion } from "framer-motion";
-import { select } from "d3-selection";
+import { select, type Selection } from "d3-selection";
 import { Tooltip } from "./Tooltip";
 import { fmtCop } from "../utils";
 import type { CampaignDonor, CampaignCandidateDetail } from "../types";
@@ -106,10 +106,10 @@ function drawArrow(
     .style("transition", "stroke-dashoffset 300ms ease-out");
 
   // Label (vertical mode only — horizontal labels are rendered as HTML)
-  let text: ReturnType<typeof s.append> | null = null;
+  let text: Selection<SVGTextElement, unknown, null, undefined> | null = null;
   if (direction === "vertical" && label) {
     text = s
-      .append("text")
+      .append<SVGTextElement>("text")
       .attr("x", w / 2 + 14)
       .attr("y", h / 2 + 3)
       .attr("text-anchor", "start")
@@ -299,7 +299,7 @@ export function DonorGraph({
     const joined =
       cands.length === 1
         ? cands[0]
-        : cands.slice(0, -1).join("; ") + "; and " + cands.at(-1);
+        : cands.slice(0, -1).join("; ") + "; and " + cands[cands.length - 1];
     return `Supplier ${supplierName} donated to ${joined}, which controls contracting entity ${entityName}.`;
   }, [supplierName, entityName, visible]);
 
